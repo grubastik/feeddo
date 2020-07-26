@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/grubastik/feeddo/cmd/heureka"
 	"github.com/stretchr/testify/assert"
@@ -71,7 +72,7 @@ func TestParseArgs(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			os.Args = tt.args
-			feeds, kafka, err := parseArgs()
+			feeds, kafka, duration, err := parseArgs()
 			if tt.err != "" {
 				require.Error(t, err)
 				assert.Equal(t, tt.err, err.Error())
@@ -81,6 +82,7 @@ func TestParseArgs(t *testing.T) {
 					assert.Equal(t, tt.feedExpected[i], f.String())
 				}
 				assert.Equal(t, tt.kafkaExpected, kafka)
+				assert.Equal(t, time.Duration(0), duration)
 			}
 		})
 	}

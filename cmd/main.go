@@ -9,8 +9,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"time"
 
-	"github.com/davecgh/go-spew/spew"
 	"github.com/grubastik/feeddo/cmd/heureka"
 	"github.com/jessevdk/go-flags"
 	"github.com/pkg/errors"
@@ -19,7 +19,7 @@ import (
 )
 
 func main() {
-	feeds, kafkaURL, err := parseArgs()
+	feeds, kafkaURL, interval, err := parseArgs()
 	if err != nil {
 		log.Fatal(fmt.Errorf("Unable to parse flags: %w", err))
 	}
@@ -30,44 +30,102 @@ func main() {
 	}
 	defer p.Close()
 
-	for _, url := range feeds {
-		err = processFeed(url, p)
+	if interval == 0 {
+		err := runProcess(feeds, p)
 		if err != nil {
-			log.Println(fmt.Errorf("Failed to process feed '%s' because of %w", url.String(), err))
+			log.Fatal(fmt.Errorf("Feeds processing failed: %w", err))
+		}
+	} else {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		// ticker do not run processing strait ahead
+		err := runProcess(feeds, p)
+		if err != nil {
+			log.Fatal(fmt.Errorf("Feeds processing failed: %w", err))
+		}
+		processing := false
+		// handle situation when someone wanted to process feeds too often
+		done := make(chan struct{})
+		defer close(done)
+		// handle error situation - breaks execution of tool
+		errChan := make(chan error)
+		defer close(errChan)
+		for {
+			select {
+			case err = <-errChan:
+			case <-done:
+				processing = false
+			case <-t.C:
+				if !processing {
+					processing = true
+					go func() {
+						err := runProcess(feeds, p)
+						if err != nil {
+							errChan <- err
+						}
+						done <- struct{}{}
+					}()
+				}
+			}
+			if err != nil {
+				break
+			}
+		}
+		if err != nil {
+			log.Fatal(fmt.Errorf("Feeds periodic processing failed: %w", err))
 		}
 	}
 }
 
-func parseArgs() ([]*url.URL, string, error) {
+func runProcess(feeds []*url.URL, p Producer) error {
+	for _, url := range feeds {
+		err := processFeed(url, p)
+		if err != nil {
+			return fmt.Errorf("Failed to process feed '%s' because of %w", url.String(), err)
+		}
+	}
+	return nil
+}
+
+func parseArgs() ([]*url.URL, string, time.Duration, error) {
 	var opts struct {
 		// list of feeds' urls
-		URLs     []string `short:"f" long:"feedUrl" description:"Provide url to feeds. Can beused multiple times" required:"true"`
-		KafkaURL string   `short:"k" long:"kafkaUrl" description:"Url to connect to kafka" required:"true"`
+		URLs           []string `short:"f" long:"feedUrl" description:"Provide url to feeds. Can beused multiple times" required:"true"`
+		KafkaURL       string   `short:"k" long:"kafkaUrl" description:"Url to connect to kafka" required:"true"`
+		RepeatInterval string   `short:"i" long:"interval" description:"Interval after which we will make another attempt to download feeds. If '0' is provided then we run process only once. Supported values are supported values by time.Duration in golang"`
 	}
 	parser := flags.NewParser(&opts, flags.PassDoubleDash|flags.IgnoreUnknown)
 	_, err := parser.Parse()
 	if err != nil {
-		return nil, "", fmt.Errorf("Unable to parse flags: %w", err)
+		return nil, "", 0, fmt.Errorf("Unable to parse flags: %w", err)
 	}
 	if len(opts.URLs) == 0 {
-		return nil, "", fmt.Errorf("List of feed URLs was not provided")
+		return nil, "", 0, fmt.Errorf("List of feed URLs was not provided")
 	}
 	feeds := []*url.URL{}
 	for _, u := range opts.URLs {
 		url, err := url.Parse(u)
 		if err != nil {
-			return nil, "", fmt.Errorf("Unable to parse feed url '%s' because of %w", u, err)
+			return nil, "", 0, fmt.Errorf("Unable to parse feed url '%s' because of %w", u, err)
 		}
 		feeds = append(feeds, url)
 	}
 	if opts.KafkaURL == "" {
-		return nil, "", fmt.Errorf("Kafka url was not provided")
+		return nil, "", 0, fmt.Errorf("Kafka url was not provided")
 	}
 
-	return feeds, opts.KafkaURL, nil
+	duration := time.Duration(0)
+	if opts.RepeatInterval != "" {
+		duration, err = time.ParseDuration(opts.RepeatInterval)
+		if err != nil {
+			return nil, "", 0, fmt.Errorf("Failed to parse duration because of %w", err)
+		}
+	}
+
+	return feeds, opts.KafkaURL, duration, nil
 }
 
-func processFeed(u *url.URL, p *kafka.Producer) error {
+func processFeed(u *url.URL, p Producer) error {
 	//create stream from response to save some memory and speedup processing
 	readCloser, err := createStream(u)
 	if err != nil {
@@ -79,7 +137,6 @@ func processFeed(u *url.URL, p *kafka.Producer) error {
 	d := xml.NewDecoder(readCloser)
 	for {
 		item, err := getItemFromStream(d)
-		spew.Dump(err)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				break
