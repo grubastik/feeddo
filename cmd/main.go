@@ -47,7 +47,7 @@ func parseArgs() ([]*url.URL, string, error) {
 	parser := flags.NewParser(&opts, flags.PassDoubleDash|flags.IgnoreUnknown)
 	_, err := parser.Parse()
 	if err != nil {
-		return nil, "", fmt.Errorf("Unable to parse flags: %w", err.Error())
+		return nil, "", fmt.Errorf("Unable to parse flags: %w", err)
 	}
 	if len(opts.URLs) == 0 {
 		return nil, "", fmt.Errorf("List of feed URLs was not provided")
@@ -56,7 +56,7 @@ func parseArgs() ([]*url.URL, string, error) {
 	for _, u := range opts.URLs {
 		url, err := url.Parse(u)
 		if err != nil {
-			return nil, "", fmt.Errorf("Unable to parse feed url '%s' because of %w", u, err.Error())
+			return nil, "", fmt.Errorf("Unable to parse feed url '%s' because of %w", u, err)
 		}
 		feeds = append(feeds, url)
 	}
@@ -130,10 +130,16 @@ func createStream(u *url.URL) (io.ReadCloser, error) {
 	return readCloser, nil
 }
 
+// Decoder implements xml decode interface
+type Decoder interface {
+	Token() (xml.Token, error)
+	DecodeElement(v interface{}, start *xml.StartElement) error
+}
+
 // getItemFromStream retrieves next item from xml
 // item can be nil if start tag of next element in feed will be not recognized
 // in this case error not provided and also will be nil
-func getItemFromStream(d *xml.Decoder) (*heureka.Item, error) {
+func getItemFromStream(d Decoder) (*heureka.Item, error) {
 	token, err := d.Token()
 	if err != nil {
 		return nil, fmt.Errorf("Failed to read node element: %w", err)
@@ -153,7 +159,12 @@ func getItemFromStream(d *xml.Decoder) (*heureka.Item, error) {
 	return nil, nil
 }
 
-func sendItemToKafka(p *kafka.Producer, topic string, m []byte) error {
+// Producer for kafka topics
+type Producer interface {
+	Produce(*kafka.Message, chan kafka.Event) error
+}
+
+func sendItemToKafka(p Producer, topic string, m []byte) error {
 	deliveryChan := make(chan kafka.Event)
 	defer close(deliveryChan)
 	km := &kafka.Message{
@@ -172,7 +183,7 @@ func sendItemToKafka(p *kafka.Producer, topic string, m []byte) error {
 	ke := <-deliveryChan
 	km, ok := ke.(*kafka.Message)
 	if !ok {
-		return fmt.Errorf("Failed to cast message from channel to kafka message: %w", ke)
+		return fmt.Errorf("Failed to cast message from channel to kafka message: %v", ke)
 	}
 	if km.TopicPartition.Error != nil {
 		return fmt.Errorf("Delivery to kafka failed: %w", km.TopicPartition.Error)

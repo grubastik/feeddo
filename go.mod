@@ -8,5 +8,6 @@ require (
 	github.com/jessevdk/go-flags v1.4.0
 	github.com/pkg/errors v0.9.1
 	github.com/shopspring/decimal v1.2.0
+	github.com/stretchr/testify v1.6.1
 	gopkg.in/confluentinc/confluent-kafka-go.v1 v1.4.2
 )
