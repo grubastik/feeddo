@@ -1,1 +1,21 @@
 # feeddo
+
+## General description
+This project implements parsing of Heaureka feeds and storing them into Kafka.
+
+## Topics which should be covered
+- feed could be downloaded or loaded from file
+- multiple feeds can be processed one by one
+- models added for feed xml and for kafka json object
+- price is parsed and all supported formats converted to decimal and error generated if price not supported
+- kafka topics populated (one topic contains all items and second only with price per click set)
+- metrics endpoint for prometeus and simple metrics should be created
+- docker file and docker compose file
+- convert cli to service with periodic processing provided urls
+
+## Usage
+Feed references shoul be provided as a command line args:
+`feeddo --feedUrl file:///feeds/some.xml --feedUrl http://some.host.org/src/someFeed.xml --kafkaUrl kafka.org`
+
+Short options also could be used
+`feeddo -f file:///feeds/some.xml -f http://some.host.org/src/someFeed.xml -k kafka.org`
