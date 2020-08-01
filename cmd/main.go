@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/grubastik/feeddo/cmd/heureka"
@@ -24,7 +25,17 @@ func main() {
 		log.Fatal(fmt.Errorf("Unable to parse flags: %w", err))
 	}
 
-	p, err := kafka.NewProducer(&kafka.ConfigMap{"bootstrap.servers": kafkaURL})
+	p, err := kafka.NewProducer(&kafka.ConfigMap{
+		"bootstrap.servers":              kafkaURL,
+		"socket.timeout.ms":              5000,
+		"request.timeout.ms":             5000,
+		"message.timeout.ms":             5000,
+		"delivery.timeout.ms":            5000,
+		"metadata.request.timeout.ms":    5000,
+		"api.version.request.timeout.ms": 5000,
+		"transaction.timeout.ms":         5000,
+		"socket.keepalive.enable":        true,
+	})
 	if err != nil {
 		log.Fatal(fmt.Errorf("Unable to init connection to Kafka: %w", err))
 	}
@@ -90,9 +101,9 @@ func runProcess(feeds []*url.URL, p Producer) error {
 func parseArgs() ([]*url.URL, string, time.Duration, error) {
 	var opts struct {
 		// list of feeds' urls
-		URLs           []string `short:"f" long:"feedUrl" description:"Provide url to feeds. Can beused multiple times" required:"true"`
-		KafkaURL       string   `short:"k" long:"kafkaUrl" description:"Url to connect to kafka" required:"true"`
-		RepeatInterval string   `short:"i" long:"interval" description:"Interval after which we will make another attempt to download feeds. If '0' is provided then we run process only once. Supported values are supported values by time.Duration in golang"`
+		URLs           []string `short:"f" long:"feedUrl" description:"Provide url to feeds. Can beused multiple times" required:"true" env:"FEED_URLS" env-delim:","`
+		KafkaURL       string   `short:"k" long:"kafkaUrl" description:"Url to connect to kafka" required:"true" env:"KAFKA_URL"`
+		RepeatInterval string   `short:"i" long:"interval" description:"Interval after which we will make another attempt to download feeds. If '0' is provided then we run process only once. Supported values are supported values by time.Duration in golang" env:"REPEAT_INTERVAL"`
 	}
 	parser := flags.NewParser(&opts, flags.PassDoubleDash|flags.IgnoreUnknown)
 	_, err := parser.Parse()
@@ -104,7 +115,7 @@ func parseArgs() ([]*url.URL, string, time.Duration, error) {
 	}
 	feeds := []*url.URL{}
 	for _, u := range opts.URLs {
-		url, err := url.Parse(u)
+		url, err := url.Parse(strings.TrimSpace(u))
 		if err != nil {
 			return nil, "", 0, fmt.Errorf("Unable to parse feed url '%s' because of %w", u, err)
 		}

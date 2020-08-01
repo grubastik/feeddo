@@ -1,0 +1,46 @@
+version: "3.3"
+
+services:
+  zookeeper:
+    image: zookeeper
+    restart: always
+    ports:
+      - "2181:2181"
+    environment:
+      ZOO_MY_ID: 1
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - kafka-net
+
+  kafka1:
+    image: confluentinc/cp-server:5.5.1
+    restart: always
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
+      KAFKA_ADVERTISED_LISTENERS: "LISTENER_EXT://localhost:9092,LISTENER_INT://kafka1:29092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "LISTENER_EXT:PLAINTEXT,LISTENER_INT:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: LISTENER_INT
+      KAFKA_CONFLUENT_LICENSE_TOPIC_REPLICATION_FACTOR: 1
+    networks:
+      - kafka-net
+
+  feeddo:
+    image: grubastik/feeddo
+    restart: always
+    environment:
+      FEED_URLS: "https://e.mall.cz/cz-mall-heureka.xml, http://src.czc.cz/exporty/heureka.xml"
+      KAFKA_URL: kafka1:29092
+      REPEAT_INTERVAL: 2h
+    depends_on:
+      - kafka1
+    networks:
+      - kafka-net
+
+networks:
+  kafka-net:

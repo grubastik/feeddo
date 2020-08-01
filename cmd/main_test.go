@@ -290,7 +290,7 @@ func TestCreateStream(t *testing.T) {
 		{
 			name:      "wrong url",
 			URL:       "http://localhost:8945",
-			err:       "Unable to download file `http://localhost:8945` because of Get \"http://localhost:8945\": dial tcp [::1]:8945: connect: connection refused",
+			err:       "connect: connection refused",
 			isFile:    false,
 			runServer: false,
 		},
@@ -321,7 +321,7 @@ func TestCreateStream(t *testing.T) {
 			}
 			if tt.err != "" {
 				require.Error(t, err)
-				assert.Equal(t, tt.err, err.Error())
+				assert.Contains(t, err.Error(), tt.err)
 			} else {
 				require.NoError(t, err)
 				assert.NotNil(t, stream)
