@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/grubastik/feeddo/cmd/heureka"
+	"github.com/grubastik/feeddo/internal/pkg/heureka"
 	"github.com/jessevdk/go-flags"
 	"github.com/pkg/errors"
 	"github.com/shopspring/decimal"
@@ -24,7 +24,7 @@ func main() {
 	if err != nil {
 		log.Fatal(fmt.Errorf("Unable to parse flags: %w", err))
 	}
-
+	// all options could be found here https://docs.confluent.io/5.5.0/clients/librdkafka/md_CONFIGURATION.html
 	p, err := kafka.NewProducer(&kafka.ConfigMap{
 		"bootstrap.servers":              kafkaURL,
 		"socket.timeout.ms":              5000,
@@ -42,60 +42,94 @@ func main() {
 	defer p.Close()
 
 	if interval == 0 {
-		err := runProcess(feeds, p)
-		if err != nil {
-			log.Fatal(fmt.Errorf("Feeds processing failed: %w", err))
+		errs := runOnce(feeds, p)
+		if len(errs) > 0 {
+			for _, err := range errs {
+				log.Println(fmt.Errorf("Onetie feeds processing failed: %w", err))
+			}
+			os.Exit(1) //non zero exit code identifies error
 		}
 	} else {
-		t := time.NewTicker(interval)
-		defer t.Stop()
-		// ticker do not run processing strait ahead
-		err := runProcess(feeds, p)
-		if err != nil {
-			log.Fatal(fmt.Errorf("Feeds processing failed: %w", err))
-		}
-		processing := false
-		// handle situation when someone wanted to process feeds too often
-		done := make(chan struct{})
-		defer close(done)
-		// handle error situation - breaks execution of tool
-		errChan := make(chan error)
-		defer close(errChan)
-		for {
-			select {
-			case err = <-errChan:
-			case <-done:
-				processing = false
-			case <-t.C:
-				if !processing {
-					processing = true
-					go func() {
-						err := runProcess(feeds, p)
-						if err != nil {
-							errChan <- err
-						}
-						done <- struct{}{}
-					}()
-				}
+		errs := runPeriodic(feeds, p, interval)
+		if len(errs) > 0 {
+			for _, err := range errs {
+				log.Println(fmt.Errorf("Periodic feeds processing failed: %w", err))
 			}
-			if err != nil {
-				break
-			}
-		}
-		if err != nil {
-			log.Fatal(fmt.Errorf("Feeds periodic processing failed: %w", err))
+			os.Exit(1) //non zero exit code identifies error
 		}
 	}
 }
 
-func runProcess(feeds []*url.URL, p Producer) error {
-	for _, url := range feeds {
-		err := processFeed(url, p)
-		if err != nil {
-			return fmt.Errorf("Failed to process feed '%s' because of %w", url.String(), err)
+func runPeriodic(feeds []*url.URL, p Producer, interval time.Duration) []error {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	// ticker do not run processing strait ahead
+	errs := runOnce(feeds, p)
+	if len(errs) != 0 {
+		return errs
+	}
+	processing := false // handle situation when someone wanted to process feeds too often
+	done := make(chan struct{})
+	defer close(done)
+	// handle error situation - breaks execution of tool
+	errChan := make(chan error)
+	defer close(errChan)
+	for {
+		var err error
+		select {
+		case err = <-errChan:
+			if err != nil {
+				errs = append(errs, err)
+			}
+		case <-done:
+			processing = false
+		case <-t.C:
+			//do not run next round if we already processing feeds or error happenned
+			if !processing && len(errs) != 0 {
+				processing = true
+				go func() {
+					errs := runOnce(feeds, p)
+					for _, err := range errs {
+						errChan <- err
+					}
+					done <- struct{}{}
+				}()
+			}
+		}
+		if !processing && len(errs) != 0 {
+			break
 		}
 	}
-	return nil
+	return errs
+}
+
+func runOnce(feeds []*url.URL, p Producer) []error {
+	// consider errChan to be notication of finishing processing
+	// if succeded - return nil
+	// on error return struct with error
+	errChan := make(chan error)
+	defer close(errChan)
+	for _, u := range feeds {
+		go func(u *url.URL) {
+			err := processFeed(u, p)
+			if err == nil {
+				errChan <- nil
+			} else {
+				errChan <- fmt.Errorf("Failed to process feed '%s' because of %w", u.String(), err)
+			}
+		}(u)
+	}
+	//block execution until all goroutines will be finished
+	errs := make([]error, 0, 0)
+	for i := 0; i < len(feeds); i++ {
+		select {
+		case err := <-errChan:
+			if err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return errs
 }
 
 func parseArgs() ([]*url.URL, string, time.Duration, error) {
@@ -257,7 +291,5 @@ func sendItemToKafka(p Producer, topic string, m []byte) error {
 		return fmt.Errorf("Delivery to kafka failed: %w", km.TopicPartition.Error)
 	}
 
-	log.Printf("Delivered message to topic %s [%d] at offset %v\n",
-		*km.TopicPartition.Topic, km.TopicPartition.Partition, km.TopicPartition.Offset)
 	return nil
 }

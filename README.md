@@ -19,3 +19,14 @@ Feed references shoul be provided as a command line args:
 
 Short options also could be used
 `feeddo -f file:///feeds/some.xml -f http://some.host.org/src/someFeed.xml -k kafka.org`
+
+## Tests
+Tests could be run with a command
+`go test ./...`
+
+## Benchmark
+Benchmarks can be run with a command
+`go test cmd/feeddo -bench=.`
+Results for different commits could be found in file `benchmark_results.txt`
+Note: before running benchmarks gzipped files should be unzipped with the following command
+`gunzip cmd/feeddo/testdata/*.gz`

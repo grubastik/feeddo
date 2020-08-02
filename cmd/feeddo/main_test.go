@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/grubastik/feeddo/cmd/heureka"
+	"github.com/grubastik/feeddo/internal/pkg/heureka"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/confluentinc/confluent-kafka-go.v1/kafka"
@@ -282,7 +282,7 @@ func TestCreateStream(t *testing.T) {
 		},
 		{
 			name:      "file success",
-			URL:       "file://testdata/sample_one_item.xml",
+			URL:       "file://testdata/one_item.xml",
 			err:       "",
 			isFile:    true,
 			runServer: false,
@@ -333,5 +333,23 @@ func TestCreateStream(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func BenchmarkRunOnce(b *testing.B) {
+	feeds := make([]*url.URL, 2, 2)
+	for i, str := range []string{"file://testdata/107090_items.xml", "file://testdata/400000_items.xml"} {
+		u, err := url.Parse(str)
+		require.NoError(b, err)
+		feeds[i] = u
+	}
+	p := producerSuccess{}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		errs := runOnce(feeds, p)
+		require.Empty(b, errs)
+		for _, err := range errs {
+			require.NoError(b, err)
+		}
 	}
 }
