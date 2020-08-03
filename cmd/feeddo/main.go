@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/grubastik/feeddo/internal/pkg/heureka"
@@ -17,6 +18,11 @@ import (
 	"github.com/pkg/errors"
 	"github.com/shopspring/decimal"
 	"gopkg.in/confluentinc/confluent-kafka-go.v1/kafka"
+)
+
+const (
+	// ideally we will need to adjustthis number based on the number of cores
+	maxProducers = 10
 )
 
 func main() {
@@ -41,30 +47,95 @@ func main() {
 	}
 	defer p.Close()
 
-	if interval == 0 {
-		errs := runOnce(feeds, p)
-		if len(errs) > 0 {
-			for _, err := range errs {
-				log.Println(fmt.Errorf("Onetie feeds processing failed: %w", err))
-			}
-			os.Exit(1) //non zero exit code identifies error
-		}
-	} else {
-		errs := runPeriodic(feeds, p, interval)
-		if len(errs) > 0 {
-			for _, err := range errs {
-				log.Println(fmt.Errorf("Periodic feeds processing failed: %w", err))
-			}
-			os.Exit(1) //non zero exit code identifies error
-		}
+	err = appRun(feeds, p, interval)
+	if err != nil {
+		os.Exit(1) //non zero exit code identifies error
 	}
 }
 
-func runPeriodic(feeds []*url.URL, p Producer, interval time.Duration) []error {
+func appRun(feeds []*url.URL, p Producer, interval time.Duration) error {
+	// add waitgroup here for kafka producers
+	kafkaWG := sync.WaitGroup{}
+	kafkaWG.Add(maxProducers + 1) // +1 indicates error producer
+
+	// create channels for kafka produssers
+	chanKafkaItem := make(chan heureka.Item) //create a copy of item
+	defer close(chanKafkaItem)
+	chanKafkaError := make(chan error)
+	defer close(chanKafkaError)
+	// we do not close next channel now. We need better control on it.
+	// this require to be careful with panics
+	chanKafkaClose := make(chan struct{})
+	defer func() {
+		// this will close channel will cause goroutine to quite
+		if r := recover(); r != nil {
+			close(chanKafkaClose)
+			kafkaWG.Wait()
+		}
+	}()
+
+	// run kafka producers here
+	for i := 0; i < maxProducers; i++ {
+		go func() {
+			defer kafkaWG.Done()
+			continueLoop := true
+			for continueLoop {
+				select {
+				case item := <-chanKafkaItem:
+					err := putItemToKafka(p, &item)
+					if err != nil {
+						chanKafkaError <- err
+					}
+				case <-chanKafkaClose:
+					continueLoop = false
+				}
+			}
+		}()
+	}
+	// log all errors from processing items here
+	// will reuse the same close channel as kafka producers
+	go func() {
+		defer kafkaWG.Done()
+		continueLoop := true
+		for continueLoop {
+			select {
+			case err := <-chanKafkaError:
+				log.Println(fmt.Errorf("Processing of item in kafka producer failed: %w", err))
+			case <-chanKafkaClose:
+				continueLoop = false
+			}
+		}
+	}()
+
+	var err error
+	if interval == 0 {
+		errs := runOnce(feeds, chanKafkaItem)
+		if len(errs) > 0 {
+			for _, err = range errs {
+				log.Println(fmt.Errorf("Onetie feeds processing failed: %w", err))
+			}
+		}
+	} else {
+		errs := runPeriodic(feeds, chanKafkaItem, interval)
+		if len(errs) > 0 {
+			for _, err = range errs {
+				log.Println(fmt.Errorf("Periodic feeds processing failed: %w", err))
+			}
+		}
+	}
+
+	//clean up all goroutines
+	close(chanKafkaClose)
+	kafkaWG.Wait()
+
+	return err
+}
+
+func runPeriodic(feeds []*url.URL, chanKafkaItem chan<- heureka.Item, interval time.Duration) []error {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	// ticker do not run processing strait ahead
-	errs := runOnce(feeds, p)
+	errs := runOnce(feeds, chanKafkaItem)
 	if len(errs) != 0 {
 		return errs
 	}
@@ -81,6 +152,7 @@ func runPeriodic(feeds []*url.URL, p Producer, interval time.Duration) []error {
 			if err != nil {
 				errs = append(errs, err)
 			}
+		// when processing of all feeds done - this channel will be triggered
 		case <-done:
 			processing = false
 		case <-t.C:
@@ -88,7 +160,7 @@ func runPeriodic(feeds []*url.URL, p Producer, interval time.Duration) []error {
 			if !processing && len(errs) != 0 {
 				processing = true
 				go func() {
-					errs := runOnce(feeds, p)
+					errs := runOnce(feeds, chanKafkaItem)
 					for _, err := range errs {
 						errChan <- err
 					}
@@ -103,7 +175,7 @@ func runPeriodic(feeds []*url.URL, p Producer, interval time.Duration) []error {
 	return errs
 }
 
-func runOnce(feeds []*url.URL, p Producer) []error {
+func runOnce(feeds []*url.URL, chanKafkaItem chan<- heureka.Item) []error {
 	// consider errChan to be notication of finishing processing
 	// if succeded - return nil
 	// on error return struct with error
@@ -111,7 +183,7 @@ func runOnce(feeds []*url.URL, p Producer) []error {
 	defer close(errChan)
 	for _, u := range feeds {
 		go func(u *url.URL) {
-			err := processFeed(u, p)
+			err := processFeed(u, chanKafkaItem)
 			if err == nil {
 				errChan <- nil
 			} else {
@@ -170,7 +242,7 @@ func parseArgs() ([]*url.URL, string, time.Duration, error) {
 	return feeds, opts.KafkaURL, duration, nil
 }
 
-func processFeed(u *url.URL, p Producer) error {
+func processFeed(u *url.URL, chanKafkaItem chan<- heureka.Item) error {
 	//create stream from response to save some memory and speedup processing
 	readCloser, err := createStream(u)
 	if err != nil {
@@ -190,23 +262,7 @@ func processFeed(u *url.URL, p Producer) error {
 			}
 		}
 		if item != nil {
-			message, err := json.Marshal(item)
-			if err != nil {
-				return fmt.Errorf("Failed to marshal json: %w", err)
-			}
-			// Produce messages to topic (asynchronously)
-			topic := "shop_items"
-			err = sendItemToKafka(p, topic, message)
-			if err != nil {
-				return fmt.Errorf("Failed to send message to topic %s because of: %w", topic, err)
-			}
-			if !item.HeurekaCPC.Equal(decimal.Zero) {
-				topic := "shop_items_bidding"
-				err := sendItemToKafka(p, topic, message)
-				if err != nil {
-					return fmt.Errorf("Failed to send message to topic %s because of: %w", topic, err)
-				}
-			}
+			chanKafkaItem <- *item
 		}
 	}
 	return nil
@@ -266,7 +322,28 @@ type Producer interface {
 	Produce(*kafka.Message, chan kafka.Event) error
 }
 
-func sendItemToKafka(p Producer, topic string, m []byte) error {
+func putItemToKafka(p Producer, item *heureka.Item) error {
+	message, err := json.Marshal(item)
+	if err != nil {
+		return fmt.Errorf("Failed to marshal json: %w", err)
+	}
+	// Produce messages to topic (asynchronously)
+	topic := "shop_items"
+	err = sendMessageToKafka(p, topic, message)
+	if err != nil {
+		return fmt.Errorf("Failed to send message to topic %s because of: %w", topic, err)
+	}
+	if !item.HeurekaCPC.Equal(decimal.Zero) {
+		topic := "shop_items_bidding"
+		err := sendMessageToKafka(p, topic, message)
+		if err != nil {
+			return fmt.Errorf("Failed to send message to topic %s because of: %w", topic, err)
+		}
+	}
+	return nil
+}
+
+func sendMessageToKafka(p Producer, topic string, m []byte) error {
 	deliveryChan := make(chan kafka.Event)
 	defer close(deliveryChan)
 	km := &kafka.Message{

@@ -147,7 +147,7 @@ func TestSendItemToKafka(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := sendItemToKafka(tt.producer, tt.topic, tt.message)
+			err := sendMessageToKafka(tt.producer, tt.topic, tt.message)
 			if tt.err != "" {
 				require.Error(t, err)
 				assert.Equal(t, tt.err, err.Error())
@@ -346,10 +346,7 @@ func BenchmarkRunOnce(b *testing.B) {
 	p := producerSuccess{}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		errs := runOnce(feeds, p)
-		require.Empty(b, errs)
-		for _, err := range errs {
-			require.NoError(b, err)
-		}
+		err := appRun(feeds, p, 0)
+		require.NoError(b, err)
 	}
 }
