@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/grubastik/feeddo/internal/pkg/heureka"
@@ -26,6 +28,7 @@ const (
 )
 
 func main() {
+	// parse args
 	feeds, kafkaURL, interval, err := parseArgs()
 	if err != nil {
 		log.Fatal(fmt.Errorf("Unable to parse flags: %w", err))
@@ -48,12 +51,24 @@ func main() {
 	defer p.Close()
 
 	err = appRun(feeds, p, interval)
+
 	if err != nil {
 		os.Exit(1) //non zero exit code identifies error
 	}
 }
 
 func appRun(feeds []*url.URL, p Producer, interval time.Duration) error {
+	// create channel for handling termination
+	// configure signals
+	// App handle signals in the folowing way:
+	// when got TERM signal - wait for the full processing of feeds (download/parsing and send them to kafka)
+	// stop app after this.
+	// it is implemented in this way, because not to get into situation when feed was downloaded but not processed.
+	// or was partially processed which leads to inconsistancy in data.
+	// if business rules will allow to stop app immediately then handling of this will be even easier.
+	sigs := make(chan os.Signal, 10)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+
 	// add waitgroup here for kafka producers
 	kafkaWG := sync.WaitGroup{}
 	kafkaWG.Add(maxProducers + 1) // +1 indicates error producer
@@ -71,6 +86,8 @@ func appRun(feeds []*url.URL, p Producer, interval time.Duration) error {
 		if r := recover(); r != nil {
 			close(chanKafkaClose)
 			kafkaWG.Wait()
+			signal.Stop(sigs)
+			close(sigs)
 		}
 	}()
 
@@ -116,7 +133,7 @@ func appRun(feeds []*url.URL, p Producer, interval time.Duration) error {
 			}
 		}
 	} else {
-		errs := runPeriodic(feeds, chanKafkaItem, interval)
+		errs := runPeriodic(feeds, chanKafkaItem, interval, sigs)
 		if len(errs) > 0 {
 			for _, err = range errs {
 				log.Println(fmt.Errorf("Periodic feeds processing failed: %w", err))
@@ -128,10 +145,15 @@ func appRun(feeds []*url.URL, p Producer, interval time.Duration) error {
 	close(chanKafkaClose)
 	kafkaWG.Wait()
 
+	//closing signals channel
+	// we do not process them anymore
+	signal.Stop(sigs)
+	close(sigs)
+
 	return err
 }
 
-func runPeriodic(feeds []*url.URL, chanKafkaItem chan<- heureka.Item, interval time.Duration) []error {
+func runPeriodic(feeds []*url.URL, chanKafkaItem chan<- heureka.Item, interval time.Duration, chanCloseApp <-chan os.Signal) []error {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	// ticker do not run processing strait ahead
@@ -140,6 +162,7 @@ func runPeriodic(feeds []*url.URL, chanKafkaItem chan<- heureka.Item, interval t
 		return errs
 	}
 	processing := false // handle situation when someone wanted to process feeds too often
+	runApp := true      // use to break app execution
 	done := make(chan struct{})
 	defer close(done)
 	// handle error situation - breaks execution of tool
@@ -148,6 +171,8 @@ func runPeriodic(feeds []*url.URL, chanKafkaItem chan<- heureka.Item, interval t
 	for {
 		var err error
 		select {
+		case <-chanCloseApp:
+			runApp = false
 		case err = <-errChan:
 			if err != nil {
 				errs = append(errs, err)
@@ -168,7 +193,13 @@ func runPeriodic(feeds []*url.URL, chanKafkaItem chan<- heureka.Item, interval t
 				}()
 			}
 		}
+		// close app in case of error
 		if !processing && len(errs) != 0 {
+			break
+		}
+		// cloase app if got ctrl-break
+		if !processing && !runApp {
+			errs = []error{errors.New("Got termination signal. Exiting")}
 			break
 		}
 	}
