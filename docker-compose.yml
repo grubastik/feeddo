@@ -33,6 +33,8 @@ services:
   feeddo:
     image: grubastik/feeddo
     restart: always
+    ports:
+      - "2112:2112"
     environment:
       FEED_URLS: "https://e.mall.cz/cz-mall-heureka.xml, http://src.czc.cz/exporty/heureka.xml"
       KAFKA_URL: kafka1:29092
