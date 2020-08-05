@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -15,13 +16,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/go-chi/chi"
+	"github.com/grubastik/feeddo/cmd/feeddo/metrics"
 	"github.com/grubastik/feeddo/internal/pkg/heureka"
 	"github.com/jessevdk/go-flags"
 	"github.com/pkg/errors"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/shopspring/decimal"
 	"gopkg.in/confluentinc/confluent-kafka-go.v1/kafka"
 )
@@ -31,14 +29,9 @@ const (
 	maxProducers = 10
 )
 
-type metricGauge struct {
-	feed   string
-	metric prometheus.Gauge
-}
-
-type metricCounter struct {
-	feed   string
-	metric prometheus.Counter
+// MetricsGetter describes interface for metrics container
+type MetricsGetter interface {
+	GetMetric(string, string) (metrics.Adder, error)
 }
 
 type appItem struct {
@@ -78,6 +71,12 @@ func main() {
 }
 
 func appRun(feeds []*url.URL, p Producer, interval time.Duration) error {
+
+	//configure app context
+	ctx := context.Background()
+	ctx = context.WithValue(ctx, "serverAddressMetrics", ":2112")
+	ctx, appCancel := context.WithCancel(ctx)
+
 	// create channel for handling termination
 	// configure signals
 	// App handle signals in the folowing way:
@@ -89,99 +88,68 @@ func appRun(feeds []*url.URL, p Producer, interval time.Duration) error {
 	sigs := make(chan os.Signal, 10)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 
-	// register prometeus metrics
-	// ideally would be to run all these metrics in their goroutines
-	// and send events to them through the channel/channels
-	// but because of lack of time - for now handling and passing them directly
-	metricsFeeds := sync.Map{}
-	metricsItems := sync.Map{}
-	for _, u := range feeds {
-		metricsFeeds.Store(
-			"feed_"+u.String(),
-			metricGauge{
-				feed: u.String(),
-				metric: promauto.NewGauge(prometheus.GaugeOpts{
-					Name: "feed_processing_" + strings.ReplaceAll(u.Host, ".", "_"),
-					Help: "1 indicates that feed start to process and 0 indicates that feed processing ends for url: " + u.String(),
-				}),
-			})
-		metricsItems.Store(
-			"total_"+u.String(),
-			metricCounter{
-				feed: u.String(),
-				metric: promauto.NewCounter(prometheus.CounterOpts{
-					Name: "total_processed_" + strings.ReplaceAll(u.Host, ".", "_"),
-					Help: "Number of items processed for url: " + u.String(),
-				}),
-			})
-		metricsItems.Store(
-			"succeeded_"+u.String(),
-			metricCounter{
-				feed: u.String(),
-				metric: promauto.NewCounter(prometheus.CounterOpts{
-					Name: "succeeded_" + strings.ReplaceAll(u.Host, ".", "_"),
-					Help: "Number of items succeeded for url: " + u.String(),
-				}),
-			})
-		metricsItems.Store("failed_"+u.String(),
-			metricCounter{
-				feed: u.String(),
-				metric: promauto.NewCounter(prometheus.CounterOpts{
-					Name: "failed_" + strings.ReplaceAll(u.Host, ".", "_"),
-					Help: "Number of items failed for url: " + u.String(),
-				}),
-			})
-	}
+	metricContainer := metrics.NewMetrics(feeds)
 
 	// add waitgroup here for kafka producers
 	kafkaWG := sync.WaitGroup{}
-	kafkaWG.Add(maxProducers + 1 + 1) // +1 indicates error producer and another +1 for metrics service
+	errorWG := sync.WaitGroup{}
 
 	// create channels for kafka produssers
 	chanKafkaItem := make(chan appItem) //create a copy of item
 	defer close(chanKafkaItem)
 	chanError := make(chan error)
 	defer close(chanError)
+	// we need separated channel from the other to handle specifically error goroutine handler
+	// this goroutine should be closed ast one as all of the other goroutines rely on it
+	chanErrorClose := make(chan struct{})
 	// we do not close next channel now. We need better control on it.
 	// this require to be careful with panics
 	chanCloseGoroutines := make(chan struct{})
 	defer func() {
 		// this will close channel will cause goroutine to quite
 		if r := recover(); r != nil {
+			appCancel()
 			close(chanCloseGoroutines)
 			kafkaWG.Wait()
 			signal.Stop(sigs)
 			close(sigs)
+			close(chanErrorClose)
+			errorWG.Wait()
 		}
 	}()
 
 	// run kafka producers here
 	for i := 0; i < maxProducers; i++ {
 		go func() {
+			kafkaWG.Add(1)
 			defer kafkaWG.Done()
 			continueLoop := true
 			for continueLoop {
 				select {
+				// if this channel will be closed - we will go here with default value for item
 				case item := <-chanKafkaItem:
-					var mc metricCounter
-					if m, ok := metricsItems.Load("total_" + item.feed); ok {
-						if mc, ok = m.(metricCounter); ok {
-							mc.metric.Add(1)
+					// all items should belong to some feed
+					if item.feed != "" {
+						m, err := metricContainer.GetMetric(item.feed, "total")
+						// in case metric is not available - report error but don't stop the app
+						if err != nil {
+							chanError <- fmt.Errorf("Failed to get metric: %w", err)
+						} else {
+							m.Add(1)
 						}
-					}
-					err := putItemToKafka(p, &item.shopItem)
-					if err != nil {
-						chanError <- err
-						if m, ok := metricsItems.Load("failed_" + item.feed); ok {
-							if mc, ok = m.(metricCounter); ok {
-								mc.metric.Add(1)
-							}
+						err = putItemToKafka(p, &item.shopItem)
+						var errM error
+						if err != nil {
+							chanError <- err
+							m, errM = metricContainer.GetMetric(item.feed, "failed")
+						} else {
+							m, errM = metricContainer.GetMetric(item.feed, "succeeded")
 						}
-					} else {
-						if m, ok := metricsItems.Load("succeeded_" + item.feed); ok {
-							if mc, ok = m.(metricCounter); ok {
-								mc.metric.Add(1)
-							}
+						// in case metric is not available - report error but don't stop the app
+						if errM != nil {
+							chanError <- fmt.Errorf("Failed to get metric: %w", err)
+						} else {
+							m.Add(1)
 						}
 					}
 				case <-chanCloseGoroutines:
@@ -193,72 +161,66 @@ func appRun(feeds []*url.URL, p Producer, interval time.Duration) error {
 	// log all errors from processing items here
 	// will reuse the same close channel as kafka producers
 	go func() {
-		defer kafkaWG.Done()
+		errorWG.Add(1) // now we have only one error reporter
+		defer errorWG.Done()
 		continueLoop := true
 		for continueLoop {
 			select {
 			case err := <-chanError:
-				log.Println(fmt.Errorf("Processing of item in kafka producer failed: %w", err))
-			case <-chanCloseGoroutines:
+				//when channel closing we start to always pick this option as default one
+				// but this does not mean that error happenned
+				if err != nil {
+					log.Println(fmt.Errorf("got the following error in app: %w", err))
+				}
+			case <-chanErrorClose:
 				continueLoop = false
 			}
 		}
 	}()
 
 	// run metrics service endpoint
+	chanMetricsErr, chanMetricsExit := metrics.RunServer(ctx)
+	//monitor metrics servie and forward errors to app channel
 	go func() {
+		kafkaWG.Add(1)
 		defer kafkaWG.Done()
-		metricsWG := sync.WaitGroup{}
-		metricsWG.Add(1)
-		router := chi.NewRouter()
-		router.Get("/metrics", promhttp.Handler().(http.HandlerFunc))
-		s := &http.Server{
-			ReadTimeout:  5 * time.Second,
-			WriteTimeout: 5 * time.Second,
-			IdleTimeout:  120 * time.Second,
-			Addr:         ":2112",
-			TLSConfig:    nil,
-			Handler:      router,
-		}
-		var err error
-		go func() {
-			defer metricsWG.Done()
-			err := s.ListenAndServe()
-			if err != nil && !errors.Is(err, http.ErrServerClosed) {
-				chanError <- err
-			}
-		}()
-
-		// block goroutine unless server exited
-		select {
-		case <-chanCloseGoroutines:
-			if err == nil { //means server exited
-				s.Close()
+		collectServerErrors := true
+		for collectServerErrors {
+			select {
+			case err := <-chanMetricsErr:
+				if err != nil {
+					chanError <- err
+				}
+			case <-chanMetricsExit:
+				collectServerErrors = false
 			}
 		}
-		metricsWG.Wait()
 	}()
 
 	var err error
 	if interval == 0 {
-		errs := runOnce(feeds, chanKafkaItem, &metricsFeeds)
+		errs := runOnce(feeds, chanKafkaItem, metricContainer)
 		if len(errs) > 0 {
 			for _, err = range errs {
-				log.Println(fmt.Errorf("Onetie feeds processing failed: %w", err))
+				chanError <- fmt.Errorf("One time feeds processing failed: %w", err)
 			}
 		}
 	} else {
-		errs := runPeriodic(feeds, chanKafkaItem, interval, sigs, &metricsFeeds)
+		errs := runPeriodic(feeds, chanKafkaItem, interval, sigs, metricContainer)
 		if len(errs) > 0 {
 			for _, err = range errs {
-				log.Println(fmt.Errorf("Periodic feeds processing failed: %w", err))
+				chanError <- fmt.Errorf("Periodic feeds processing failed: %w", err)
 			}
 		}
 	}
 
 	//clean up all goroutines
+	appCancel()
 	close(chanCloseGoroutines)
 	kafkaWG.Wait()
+	//close error channel when all other gorutines exited
+	close(chanErrorClose)
+	errorWG.Wait()
 
 	//closing signals channel
 	// we do not process them anymore
@@ -268,7 +230,7 @@ func appRun(feeds []*url.URL, p Producer, interval time.Duration) error {
 	return err
 }
 
-func runPeriodic(feeds []*url.URL, chanKafkaItem chan<- appItem, interval time.Duration, chanCloseApp <-chan os.Signal, metrics *sync.Map) []error {
+func runPeriodic(feeds []*url.URL, chanKafkaItem chan<- appItem, interval time.Duration, chanCloseApp <-chan os.Signal, metrics MetricsGetter) []error {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	// ticker do not run processing strait ahead
@@ -283,8 +245,8 @@ func runPeriodic(feeds []*url.URL, chanKafkaItem chan<- appItem, interval time.D
 	// handle error situation - breaks execution of tool
 	errChan := make(chan error)
 	defer close(errChan)
+	var err error
 	for {
-		var err error
 		select {
 		case <-chanCloseApp:
 			runApp = false
@@ -297,7 +259,7 @@ func runPeriodic(feeds []*url.URL, chanKafkaItem chan<- appItem, interval time.D
 			processing = false
 		case <-t.C:
 			//do not run next round if we already processing feeds or error happenned
-			if !processing && len(errs) != 0 {
+			if !processing && len(errs) == 0 {
 				processing = true
 				go func() {
 					errs := runOnce(feeds, chanKafkaItem, metrics)
@@ -321,7 +283,7 @@ func runPeriodic(feeds []*url.URL, chanKafkaItem chan<- appItem, interval time.D
 	return errs
 }
 
-func runOnce(feeds []*url.URL, chanKafkaItem chan<- appItem, metrics *sync.Map) []error {
+func runOnce(feeds []*url.URL, chanKafkaItem chan<- appItem, mC MetricsGetter) []error {
 	// consider errChan to be notication of finishing processing
 	// if succeded - return nil
 	// on error return struct with error
@@ -329,19 +291,16 @@ func runOnce(feeds []*url.URL, chanKafkaItem chan<- appItem, metrics *sync.Map) 
 	defer close(errChan)
 	for _, u := range feeds {
 		go func(u *url.URL) {
-			var mc metricGauge
-			if m, ok := metrics.Load("feeds_" + u.String()); ok {
-				if mc, ok = m.(metricGauge); ok {
-					mc.metric.Set(1)
-				}
+			m, err := mC.GetMetric(u.String(), "feed")
+			// in case metric is not available - report error but don't stop the app
+			if err != nil {
+				errChan <- fmt.Errorf("Failed to get metric: %w", err)
+			} else {
+				m.Add(1)
+				defer m.Add(-1)
 			}
-			defer func() {
-				if mc.metric != nil {
-					mc.metric.Set(0)
-				}
-			}()
 
-			err := processFeed(u, chanKafkaItem)
+			err = processFeed(u, chanKafkaItem)
 			if err == nil {
 				errChan <- nil
 			} else {
