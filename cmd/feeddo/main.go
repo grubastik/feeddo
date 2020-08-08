@@ -43,7 +43,7 @@ type appItem struct {
 }
 
 func (ai appItem) GetContext() string       { return ai.feed }
-func (ai appItem) GetID() string            { return ai.shopItem.ID }
+func (ai appItem) GetID() string            { return string(ai.shopItem.ID) }
 func (ai appItem) Marshal() ([]byte, error) { return json.Marshal(ai.shopItem) }
 func (ai appItem) Topics() []string         { return ai.topics }
 
