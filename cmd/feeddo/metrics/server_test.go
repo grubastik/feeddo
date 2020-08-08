@@ -21,12 +21,12 @@ func TestRunServerContextError(t *testing.T) {
 		err  string
 	}{
 		{"No key", context.Background(),
-			"Error in server address for metrics: Provided context does not contain key 'serverAddressMetrics'"},
-		{"No value", context.WithValue(context.Background(), "serverAddressMetrics", nil),
-			"Error in server address for metrics: Provided context does not contain key 'serverAddressMetrics'"},
-		{"Empty string", context.WithValue(context.Background(), "serverAddressMetrics", ""),
-			"Error in server address for metrics: Provided context does not contain string value in key 'serverAddressMetrics'"},
-		{"fake address", context.WithValue(context.Background(), "serverAddressMetrics", "abc:-10050"), "listen tcp: address -10050: invalid port"},
+			fmt.Sprintf("Error in server address for metrics: Provided context does not contain key '%s'", MetricsAddressCtxKey)},
+		{"No value", context.WithValue(context.Background(), MetricsAddressCtxKey, nil),
+			fmt.Sprintf("Error in server address for metrics: Provided context does not contain key '%s'", MetricsAddressCtxKey)},
+		{"Empty string", context.WithValue(context.Background(), MetricsAddressCtxKey, ""),
+			fmt.Sprintf("Error in server address for metrics: Provided context does not contain string value in key '%s'", MetricsAddressCtxKey)},
+		{"fake address", context.WithValue(context.Background(), MetricsAddressCtxKey, "abc:-10050"), "listen tcp: address -10050: invalid port"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -47,7 +47,7 @@ func TestRunServerPortAlreadyInUse(t *testing.T) {
 	}))
 	defer s.Close()
 	address := strings.Replace(s.URL, "http://", "", 1)
-	ctx := context.WithValue(context.Background(), "serverAddressMetrics", address)
+	ctx := context.WithValue(context.Background(), MetricsAddressCtxKey, address)
 	chanErr, chanClose := RunServer(ctx)
 	// this scenario should result in error and this channel should be closed
 	<-chanClose
@@ -59,7 +59,7 @@ func TestRunServerPortAlreadyInUse(t *testing.T) {
 func TestRunServerHappyPath(t *testing.T) {
 	rand.Seed(time.Now().UnixNano())
 	randPort := rand.Intn(1000) + 55000
-	ctx := context.WithValue(context.Background(), "serverAddressMetrics", fmt.Sprintf("127.0.0.1:%d", randPort))
+	ctx := context.WithValue(context.Background(), MetricsAddressCtxKey, fmt.Sprintf("127.0.0.1:%d", randPort))
 	ctx, cancelFunc := context.WithCancel(ctx)
 	chanErr, chanClose := RunServer(ctx)
 	//set some timeout

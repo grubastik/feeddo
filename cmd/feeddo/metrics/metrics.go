@@ -9,6 +9,17 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
+const (
+	//MetricTypeFeed defines type for feed metric
+	MetricTypeFeed = "feed"
+	//MetricTypeTotal defines type for total metric
+	MetricTypeTotal = "total"
+	//MetricTypeFailed defines type for failed metric
+	MetricTypeFailed = "failed"
+	//MetricTypeSucceeded defines type for succeeded metric
+	MetricTypeSucceeded = "succeeded"
+)
+
 // Adder add value from param to internal value
 // Gauge and Counter both support method Add
 // the only difference is that val could not be negative for Counter
@@ -29,19 +40,19 @@ func NewMetrics(listURL []*url.URL) Container {
 		if _, ok := container[key]; !ok {
 			container[key] = make(map[string]Adder)
 		}
-		container[key]["feed"] = promauto.NewGauge(prometheus.GaugeOpts{
+		container[key][MetricTypeFeed] = promauto.NewGauge(prometheus.GaugeOpts{
 			Name: "feed_processing_" + strings.ReplaceAll(u.Host, ".", "_"),
 			Help: "1 indicates that feed start to process and 0 indicates that feed processing ends for url: " + key,
 		})
-		container[key]["total"] = promauto.NewCounter(prometheus.CounterOpts{
+		container[key][MetricTypeTotal] = promauto.NewCounter(prometheus.CounterOpts{
 			Name: "total_processed_" + strings.ReplaceAll(u.Host, ".", "_"),
 			Help: "Number of items processed for url: " + key,
 		})
-		container[key]["succeeded"] = promauto.NewCounter(prometheus.CounterOpts{
+		container[key][MetricTypeSucceeded] = promauto.NewCounter(prometheus.CounterOpts{
 			Name: "succeeded_" + strings.ReplaceAll(u.Host, ".", "_"),
 			Help: "Number of items succeeded for url: " + u.String(),
 		})
-		container[key]["failed"] = promauto.NewCounter(prometheus.CounterOpts{
+		container[key][MetricTypeFailed] = promauto.NewCounter(prometheus.CounterOpts{
 			Name: "failed_" + strings.ReplaceAll(u.Host, ".", "_"),
 			Help: "Number of items failed for url: " + u.String(),
 		})

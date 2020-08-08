@@ -12,7 +12,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// RunService - run  server on the provided address and expose /metrics endpoint
+const (
+	//MetricsAddressCtxKey defines key for context value of the addres for server
+	MetricsAddressCtxKey = "metricsServerAddress"
+)
+
+// RunServer - run  server on the provided address and expose /metrics endpoint
 // return 2 channels: first for getting error messages and second channel idenifies status of the server
 // if second channel will be closed - server exited
 // Context should contain under key "serverAddressMetrics" string with local address to which it will be binded
@@ -65,13 +70,13 @@ func RunServer(ctx context.Context) (<-chan error, <-chan struct{}) {
 }
 
 func getAddressFromContext(ctx context.Context) (string, error) {
-	addrRaw := ctx.Value("serverAddressMetrics")
+	addrRaw := ctx.Value(MetricsAddressCtxKey)
 	if addrRaw == nil {
-		return "", errors.New("Provided context does not contain key 'serverAddressMetrics'")
+		return "", fmt.Errorf("Provided context does not contain key '%s'", MetricsAddressCtxKey)
 	}
 	addr, ok := addrRaw.(string)
 	if !ok || addr == "" {
-		return "", errors.New("Provided context does not contain string value in key 'serverAddressMetrics'")
+		return "", fmt.Errorf("Provided context does not contain string value in key '%s'", MetricsAddressCtxKey)
 	}
 	return addr, nil
 }
