@@ -3,11 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"encoding/xml"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -18,6 +15,8 @@ import (
 
 	"github.com/grubastik/feeddo/cmd/feeddo/kafka"
 	"github.com/grubastik/feeddo/cmd/feeddo/metrics"
+	"github.com/grubastik/feeddo/cmd/feeddo/parser"
+	"github.com/grubastik/feeddo/cmd/feeddo/provider"
 	"github.com/grubastik/feeddo/internal/pkg/heureka"
 	"github.com/jessevdk/go-flags"
 	"github.com/pkg/errors"
@@ -220,6 +219,7 @@ func appRun(feeds []*url.URL, kafkaURL string, interval time.Duration) error {
 }
 
 func incrementMetric(mc metrics.Container, context, metricType string) error {
+	fmt.Println("increment metric " + context + " type " + metricType)
 	m, err := mc.GetMetric(context, metricType)
 	if err != nil {
 		return fmt.Errorf("Failed to get metric: %w", err)
@@ -289,6 +289,13 @@ func runOnce(feeds []*url.URL, chanKafkaItem chan<- kafka.Itemer, mC MetricsGett
 	defer close(errChan)
 	for _, u := range feeds {
 		go func(u *url.URL) {
+			//create stream from response to save some memory and speedup processing
+			readCloser, err := provider.CreateStream(u)
+			if err != nil {
+				errChan <- fmt.Errorf("Failed to get stream: %w", err)
+				//there is no sense to continue
+				return
+			}
 			m, err := mC.GetMetric(u.String(), "feed")
 			// in case metric is not available - report error but don't stop the app
 			if err != nil {
@@ -298,12 +305,35 @@ func runOnce(feeds []*url.URL, chanKafkaItem chan<- kafka.Itemer, mC MetricsGett
 				defer m.Add(-1)
 			}
 
-			err = processFeed(u, chanKafkaItem)
-			if err == nil {
-				errChan <- nil
-			} else {
-				errChan <- fmt.Errorf("Failed to process feed '%s' because of %w", u.String(), err)
-			}
+			chanItemProducer, chanProducerError := parser.ProcessFeed(readCloser)
+			go func() {
+				defer readCloser.Close()
+				runLoop := true
+				for runLoop {
+					fmt.Println("start loop for item")
+					select {
+					case item := <-chanItemProducer:
+						fmt.Println("process item")
+						if item.ID != "" {
+							fmt.Println("process item with ID " + item.ID)
+							topics := []string{kafka.TopicShopItems}
+							if !item.HeurekaCPC.Equal(decimal.Zero) {
+								topics = append(topics, kafka.TopicShopItemsBidding)
+							}
+							chanKafkaItem <- appItem{shopItem: item, feed: u.String(), topics: topics}
+						}
+					case err := <-chanProducerError:
+						fmt.Println("process item err")
+						if err != nil {
+							fmt.Println("exit loop because of error")
+							errChan <- fmt.Errorf("Failed to process feed '%s' because of %w", u.String(), err)
+						} else {
+							errChan <- nil
+						}
+						runLoop = false
+					}
+				}
+			}()
 		}(u)
 	}
 	//block execution until all goroutines will be finished
@@ -355,83 +385,4 @@ func parseArgs() ([]*url.URL, string, time.Duration, error) {
 	}
 
 	return feeds, opts.KafkaURL, duration, nil
-}
-
-func processFeed(u *url.URL, chanKafkaItem chan<- kafka.Itemer) error {
-	//create stream from response to save some memory and speedup processing
-	readCloser, err := createStream(u)
-	if err != nil {
-		return fmt.Errorf("Failed to get stream: %w", err)
-	}
-	defer readCloser.Close()
-	// try to unmarshal stream.
-	// If this stream is not represent expected schema - result will be empty.
-	d := xml.NewDecoder(readCloser)
-	for {
-		item, err := getItemFromStream(d)
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			} else {
-				return fmt.Errorf("Failed to unmarshal xml: %w", err)
-			}
-		}
-		if item != nil {
-			topics := []string{kafka.TopicShopItems}
-			if !item.HeurekaCPC.Equal(decimal.Zero) {
-				topics = append(topics, kafka.TopicShopItemsBidding)
-			}
-			chanKafkaItem <- appItem{shopItem: *item, feed: u.String(), topics: topics}
-		}
-	}
-	return nil
-}
-
-func createStream(u *url.URL) (io.ReadCloser, error) {
-	var readCloser io.ReadCloser
-	var err error
-	if u.Scheme == "file" {
-		readCloser, err = os.Open(u.Hostname() + u.EscapedPath())
-		if err != nil {
-			return nil, fmt.Errorf("Unable to read file `%v` because of %w", u, err)
-		}
-	} else {
-		resp, err := http.Get(u.String())
-		if err == nil && resp.Body != nil {
-			readCloser = resp.Body
-		}
-		if err != nil {
-			return nil, fmt.Errorf("Unable to download file `%v` because of %w", u, err)
-		}
-	}
-	return readCloser, nil
-}
-
-// Decoder implements xml decode interface
-type Decoder interface {
-	Token() (xml.Token, error)
-	DecodeElement(v interface{}, start *xml.StartElement) error
-}
-
-// getItemFromStream retrieves next item from xml
-// item can be nil if start tag of next element in feed will be not recognized
-// in this case error not provided and also will be nil
-func getItemFromStream(d Decoder) (*heureka.Item, error) {
-	token, err := d.Token()
-	if err != nil {
-		return nil, fmt.Errorf("Failed to read node element: %w", err)
-	}
-	switch startElem := token.(type) {
-	case xml.StartElement:
-		if startElem.Name.Local == "SHOPITEM" {
-			item := &heureka.Item{}
-			err = d.DecodeElement(item, &startElem)
-			if err != nil {
-				return nil, fmt.Errorf("Failed to unmarshal xml node: %w", err)
-			}
-			return item, nil
-		}
-	default:
-	}
-	return nil, nil
 }
