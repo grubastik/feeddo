@@ -25,11 +25,12 @@ Tests could be run with a command
 `go test ./...`
 
 ## Benchmark
-Benchmarks can be run with a command
-`go test cmd/feeddo -bench=.`
-Results for different commits could be found in file [benchmark_results.md](benchmark_results.md)
-Note: before running benchmarks gzipped files should be unzipped with the following command
-`gunzip cmd/feeddo/testdata/*.gz`
+Need to find design for fixing/running benchmark
+~~Benchmarks can be run with a command~~
+~~`go test cmd/feeddo -bench=.`~~
+~~Results for different commits could be found in file [benchmark_results.md](benchmark_results.md)~~
+~~Note: before running benchmarks gzipped files should be unzipped with the following command~~
+~~`gunzip cmd/feeddo/testdata/*.gz`~~
 
 ## Prometeus metrics
 Metrics exposed on port 2112. Available metrics per feed:

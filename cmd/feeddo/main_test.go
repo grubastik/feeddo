@@ -223,6 +223,7 @@ func TestRunPeriodic(t *testing.T) {
 }
 
 // commenting for now - unable to pass mock kafka producer
+// TODO: make benchmark work again
 // type producerSuccess struct{}
 
 // func (pp producerSuccess) Produce(m *kafka.Message, c chan kafka.Event) error {
