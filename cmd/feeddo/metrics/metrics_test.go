@@ -50,3 +50,41 @@ func TestGetMetric(t *testing.T) {
 		})
 	}
 }
+
+type AdderCustom int
+
+func (ac *AdderCustom) Add(i float64) {
+	*ac += AdderCustom(i)
+}
+
+func TestIncrementMetric(t *testing.T) {
+	var a AdderCustom
+	m := make(Container)
+	m["a"] = make(map[string]Adder)
+	m["a"]["b"] = &a
+	tests := []struct {
+		name       string
+		key        string
+		metricType string
+		expected   int
+		err        string
+	}{
+		{"Key does not exist", "b", "", 0, "Failed to get metric: Metric for key 'b' is not configured"},
+		{"happy path", "a", "b", 1, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := m.IncrementMetric(tt.key, tt.metricType)
+			if tt.err == "" {
+				require.NoError(t, err)
+				adder, _ := m.GetMetric(tt.key, tt.metricType)
+				adderC, ok := adder.(*AdderCustom)
+				require.True(t, ok)
+				assert.Equal(t, tt.expected, int(*adderC))
+			} else {
+				require.Error(t, err)
+				assert.Equal(t, tt.err, err.Error())
+			}
+		})
+	}
+}

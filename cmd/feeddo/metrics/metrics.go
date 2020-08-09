@@ -70,3 +70,13 @@ func (c Container) GetMetric(key, typeMetric string) (Adder, error) {
 	}
 	return nil, fmt.Errorf("Metric for key '%s' is not configured", key)
 }
+
+// IncrementMetric increments metric
+func (c Container) IncrementMetric(key, metricType string) error {
+	m, err := c.GetMetric(key, metricType)
+	if err != nil {
+		return fmt.Errorf("Failed to get metric: %w", err)
+	}
+	m.Add(1)
+	return nil
+}
